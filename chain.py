@@ -34,7 +34,12 @@ def valid_chain(chain, difficulty: int = None):
     - lista de Block objects
     - lista de dicts (serializada)
     Se `difficulty` for fornecida, também verifica proof-of-work (hash startswith zeros).
-    Esta versão é tolerante a blocos serializados sem campo 'hash' — calcula e preenche.
+    Esta versão:
+    - normaliza para lista de dicts;
+    - calcula hashes ausentes (preenche) quando possível;
+    - verifica prev_hash contra hash calculado do bloco anterior;
+    - verifica expected_hash vs hash fornecido;
+    - verifica proof-of-work quando difficulty é passada.
     """
     # normalizar para lista de dicts
     normalized = []
@@ -48,10 +53,28 @@ def valid_chain(chain, difficulty: int = None):
         # assume lista de dicts
         normalized = [dict(b) for b in chain]  # copia para permitir modificações
 
+    # garantir que o primeiro bloco tenha hash calculável (genesis ou similar)
+    try:
+        if not normalized:
+            return False
+        if not normalized[0].get("hash"):
+            temp = create_block_from_dict(normalized[0])
+            normalized[0]["hash"] = hash_block(temp)
+    except Exception:
+        return False
+
     # verificar continuidade e integridade dos hashes
     for i in range(1, len(normalized)):
         prev = normalized[i - 1]
         cur = normalized[i]
+
+        # garantir que prev tenha hash; calcular se ausente
+        if not prev.get("hash"):
+            try:
+                temp_prev = create_block_from_dict(prev)
+                prev["hash"] = hash_block(temp_prev)
+            except Exception:
+                return False
 
         # checar link para o bloco anterior
         if cur.get("prev_hash") != prev.get("hash"):
@@ -72,12 +95,11 @@ def valid_chain(chain, difficulty: int = None):
 
         # comparar hashes
         if remote_hash != expected_hash:
-            # mismatch detectado -> cadeia inválida
             return False
 
         # verificar proof-of-work se necessário
         if difficulty is not None:
-            if not expected_hash.startswith("0" * difficulty):
+            if not remote_hash.startswith("0" * difficulty):
                 return False
 
     return True
