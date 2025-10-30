@@ -2,7 +2,7 @@ import json
 import os
 from typing import List
 
-from block import Block, create_block, create_block_from_dict, create_genesis_block, hash_block
+from block import Block, create_block, create_block_from_dict, create_genesis_block
 from network import broadcast_block, broadcast_transaction
 
 
@@ -28,58 +28,10 @@ def save_chain(fpath: str, chain: list[Block]):
         json.dump(blockchain_serializable, f, indent=2)
 
 
-def valid_chain(chain, difficulty: int = None):
-    """
-    Valida uma cadeia. `chain` pode ser:
-    - lista de Block objects
-    - lista de dicts (serializada)
-    Se `difficulty` for fornecida, também verifica proof-of-work (hash startswith zeros).
-    Esta versão é tolerante a blocos serializados sem campo 'hash' — calcula e preenche.
-    """
-    # normalizar para lista de dicts
-    normalized = []
-    if not chain:
-        return False
-
-    if isinstance(chain[0], Block):
-        for b in chain:
-            normalized.append(b.as_dict())
-    else:
-        # assume lista de dicts
-        normalized = [dict(b) for b in chain]  # copia para permitir modificações
-
-    # verificar continuidade e integridade dos hashes
-    for i in range(1, len(normalized)):
-        prev = normalized[i - 1]
-        cur = normalized[i]
-
-        # checar link para o bloco anterior
-        if cur.get("prev_hash") != prev.get("hash"):
+def valid_chain(chain):
+    for i in range(1, len(chain)):
+        if chain[i]["prev_hash"] != chain[i - 1]["hash"]:
             return False
-
-        # calcular hash esperado a partir dos campos do bloco atual
-        try:
-            temp_block = create_block_from_dict(cur)
-            expected_hash = hash_block(temp_block)
-        except Exception:
-            return False
-
-        # se o bloco remoto não trouxe 'hash', preenchê-lo com o esperado (aceitar)
-        remote_hash = cur.get("hash")
-        if not remote_hash:
-            cur["hash"] = expected_hash
-            remote_hash = expected_hash
-
-        # comparar hashes
-        if remote_hash != expected_hash:
-            # mismatch detectado -> cadeia inválida
-            return False
-
-        # verificar proof-of-work se necessário
-        if difficulty is not None:
-            if not expected_hash.startswith("0" * difficulty):
-                return False
-
     return True
 
 
