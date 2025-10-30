@@ -1,6 +1,6 @@
 from typing import Dict, List
 
-from chain import load_chain, make_transaction, mine_block, on_valid_block_callback
+from chain import load_chain, make_transaction, mine_block
 from network import start_server
 from utils import load_config
 
@@ -18,7 +18,6 @@ if __name__ == "__main__":
         config["difficulty"],
         transactions,
         config["blockchain_file"],
-        config.get("peers_file", "configs/peers.txt"),
     )
 
     # create a transaction

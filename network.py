@@ -16,11 +16,10 @@ def list_peers(fpath: str):
 
 
 def broadcast_block(block: Block, peers_fpath: str, port: int):
-    print("Broadcasting transaction...")
+    print("Broadcasting block...")
     for peer in list_peers(peers_fpath):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(5)
             s.connect((peer, port))
             s.send(json.dumps({"type": "block", "data": block.as_dict()}).encode())
             s.close()
@@ -43,150 +42,55 @@ def broadcast_transaction(tx: Dict, peers_fpath: str, port: int):
 
 
 def handle_client(
-    conn: socket.socket,
-    addr: str,
-    blockchain: List[Block],
-    difficulty: int,
-    transactions: List[Dict],
-    blockchain_fpath: str,
-    on_valid_block_callback: Callable,
+        conn: socket.socket,
+        addr: str,
+        blockchain: List[Block],
+        difficulty: int,
+        transactions: List[Dict],
+        blockchain_fpath: str,
+        on_valid_block_callback: Callable,
 ):
     try:
-        raw = conn.recv(65536)
-        if not raw:
-            # cliente fechou conexão sem enviar dados
-            return
-        try:
-            data = raw.decode()
-        except Exception:
-            print(f"[!] Failed to decode bytes from {addr}")
-            return
-
-        if not data or not data.strip():
-            # mensagem vazia
-            return
-
-        # --- Novo: tratar requisições HTTP GET (requests.get envia GET) ---
-        # Se for um pedido HTTP, responde com a blockchain serializada
-        first_line = data.splitlines()[0] if data.splitlines() else ""
-        if first_line.startswith("GET "):
-            parts = first_line.split()
-            path = parts[1] if len(parts) >= 2 else "/"
-            endpoints = ["/chain", "/blockchain", "/blockchain.json", "/blocks"]
-            if path in endpoints:
-                try:
-                    chain_list = [b.as_dict() for b in blockchain]
-                    payload = json.dumps(chain_list)
-                    resp = (
-                        "HTTP/1.1 200 OK\r\n"
-                        "Content-Type: application/json\r\n"
-                        f"Content-Length: {len(payload.encode())}\r\n"
-                        "Connection: close\r\n"
-                        "\r\n"
-                        f"{payload}"
-                    )
-                    conn.send(resp.encode())
-                except Exception as e:
-                    print(f"[!] Error sending chain to {addr}: {e}")
-                return
-            else:
-                # caminho desconhecido
-                resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                try:
-                    conn.send(resp.encode())
-                except Exception:
-                    pass
-                return
-        # --- Fim tratamento HTTP ---
-
-        # tenta interpretar como JSON (mensagens de peers via socket raw)
-        try:
-            msg = json.loads(data.strip())
-        except json.JSONDecodeError:
-            print(f"[!] Received non-JSON or malformed message from {addr}: {data!r}")
-            return
-
-        if msg.get("type") == "block":
+        data = conn.recv(4096).decode()
+        msg = json.loads(data)
+        if msg["type"] == "block":
             block = create_block_from_dict(msg["data"])
             expected_hash = hash_block(block)
+
+            # Verifica se o bloco é válido
             if (
-                block.prev_hash == blockchain[-1].hash
-                and block.hash.startswith("0" * difficulty)
-                and block.hash == expected_hash
+                    block.hash.startswith("0" * difficulty)
+                    and block.hash == expected_hash
             ):
-                blockchain.append(block)
+                # Verifica se já existe um bloco com o mesmo índice
+                existing_block_index = None
+                for i, existing_block in enumerate(blockchain):
+                    if existing_block.index == block.index:
+                        existing_block_index = i
+                        break
+
+                # Se existe um bloco com o mesmo índice, substitui
+                if existing_block_index is not None:
+                    blockchain[existing_block_index] = block
+                    print(f"[✓] Block {block.index} replaced from {addr}")
+                # Se o bloco é sequencial (index correto), adiciona ao final
+                elif block.index == len(blockchain):
+                    if blockchain and block.prev_hash == blockchain[-1].hash:
+                        blockchain.append(block)
+                        print(f"[✓] New block {block.index} added from {addr}")
+                    else:
+                        print(f"[!] Invalid prev_hash in block received from {addr}")
+                        conn.close()
+                        return
+                else:
+                    print(f"[!] Invalid block index {block.index} received from {addr}. Expected {len(blockchain)}")
+                    conn.close()
+                    return
+
                 on_valid_block_callback(blockchain_fpath, blockchain)
-                print(f"[✓] New valid block added from {addr}")
-
-                # Após aceitar um bloco válido, resolver possíveis empates/bifurcações
-                try:
-                    from chain import valid_chain, load_chain as _load_chain
-                    # Obter a cadeia do peer (mesma porta do servidor)
-                    peer_host = addr[0] if isinstance(addr, tuple) else addr.split(':')[0]
-                    peer_port = server_port
-                    endpoints = ["/chain", "/blockchain", "/blockchain.json", "/blocks"]
-                    remote_chain = None
-                    for ep in endpoints:
-                        try:
-                            url = f"http://{peer_host}:{peer_port}{ep}"
-                            resp = requests.get(url, timeout=3)
-                            if resp.status_code == 200:
-                                try:
-                                    data_remote = resp.json()
-                                    if isinstance(data_remote, dict) and "chain" in data_remote:
-                                        remote_chain = data_remote["chain"]
-                                    elif isinstance(data_remote, list):
-                                        remote_chain = data_remote
-                                    elif isinstance(data_remote, dict) and "blocks" in data_remote and isinstance(data_remote["blocks"], list):
-                                        remote_chain = data_remote["blocks"]
-                                    if remote_chain is not None:
-                                        break
-                                except ValueError:
-                                    continue
-                        except Exception:
-                            continue
-
-                    if remote_chain and valid_chain(remote_chain, difficulty):
-                        local_len = len(blockchain)
-                        remote_len = len(remote_chain)
-                        adopt = False
-                        if remote_len > local_len:
-                            adopt = True
-                        elif remote_len == local_len:
-                            try:
-                                remote_last = remote_chain[-1].get("hash")
-                                local_last = blockchain[-1].hash
-                                if remote_last and int(remote_last, 16) < int(local_last, 16):
-                                    adopt = True
-                            except Exception:
-                                adopt = False
-
-                        if adopt:
-                            try:
-                                with open(blockchain_fpath, "w") as f:
-                                    json.dump(remote_chain, f, indent=2)
-                                reloaded = _load_chain(blockchain_fpath)
-                                blockchain[:] = reloaded
-                                print(f"[consensus] Adopted remote chain from {peer_host}:{peer_port} (len {remote_len}).")
-                                try:
-                                    on_valid_block_callback(blockchain_fpath, blockchain)
-                                except Exception:
-                                    pass
-                                # Rebroadcast do tip para acelerar convergência
-                                try:
-                                    tip = blockchain[-1]
-                                    from network import broadcast_block as _broadcast_block
-                                    _broadcast_block(tip, "configs/peers.txt", server_port)
-                                except Exception:
-                                    pass
-                            except Exception as e:
-                                print(f"[consensus] Failed to adopt remote chain: {e}")
-                except Exception:
-                    pass
-
             else:
                 print(f"[!] Invalid block received from {addr}")
-        elif msg.get("type") == "tx":
+        elif msg["type"] == "tx":
             tx = msg["data"]
             if tx not in transactions:
                 transactions.append(tx)
@@ -195,21 +99,17 @@ def handle_client(
         print(
             f"Exception when hadling client. Exception: {e}. {traceback.format_exc()}"
         )
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    conn.close()
 
 
 def start_server(
-    host: str,
-    port: int,
-    blockchain: List[Block],
-    difficulty: int,
-    transactions: List[Dict],
-    blockchain_fpath: str,
-    on_valid_block_callback: Callable,
+        host: str,
+        port: int,
+        blockchain: List[Block],
+        difficulty: int,
+        transactions: List[Dict],
+        blockchain_fpath: str,
+        on_valid_block_callback: Callable,
 ):
     def server_thread():
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
