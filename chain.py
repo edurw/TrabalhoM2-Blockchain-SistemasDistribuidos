@@ -41,14 +41,14 @@ def print_chain(blockchain: List[Block]):
 
 
 def mine_block(
-    transactions: List,
-    blockchain: List[Block],
-    node_id: str,
-    reward: int,
-    difficulty: int,
-    blockchain_fpath: str,
-    peers_fpath: str,
-    port: int,
+        transactions: List,
+        blockchain: List[Block],
+        node_id: str,
+        reward: int,
+        difficulty: int,
+        blockchain_fpath: str,
+        peers_fpath: str,
+        port: int,
 ):
     new_block = create_block(
         transactions,
@@ -58,12 +58,25 @@ def mine_block(
         reward=reward,
         difficulty=difficulty,
     )
-    blockchain.append(new_block)
+
+    # se o meu bloco ja existir na blockchain, ele deve substituir pelo meu.
+    block_exists = False
+    for i, existing_block in enumerate(blockchain):
+        if existing_block.index == new_block.index:
+            # Substitui o bloco existente pelo novo bloco minerado
+            blockchain[i] = new_block
+            block_exists = True
+            print(f"[!] Block {new_block.index} already exists, replacing with new mined block.")
+            break
+
+    # Se o bloco não existir, adiciona no final da blockchain
+    if not block_exists:
+        blockchain.append(new_block)
+
     transactions.clear()
     save_chain(blockchain_fpath, blockchain)
     broadcast_block(new_block, peers_fpath, port)
     print(f"[✓] Block {new_block.index} mined and broadcasted.")
-
 
 def make_transaction(sender, recipient, amount, transactions, peers_file, port):
     tx = {"from": sender, "to": recipient, "amount": amount}
