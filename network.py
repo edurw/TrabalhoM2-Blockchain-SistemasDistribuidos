@@ -20,6 +20,7 @@ def broadcast_block(block: Block, peers_fpath: str, port: int):
     for peer in list_peers(peers_fpath):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
             s.connect((peer, port))
             s.send(json.dumps({"type": "block", "data": block.as_dict()}).encode())
             s.close()
@@ -116,6 +117,73 @@ def handle_client(
                 blockchain.append(block)
                 on_valid_block_callback(blockchain_fpath, blockchain)
                 print(f"[✓] New valid block added from {addr}")
+
+                # Após aceitar um bloco válido, resolver possíveis empates/bifurcações
+                try:
+                    from chain import valid_chain, load_chain as _load_chain
+                    # Obter a cadeia do peer (mesma porta do servidor)
+                    peer_host = addr[0] if isinstance(addr, tuple) else addr.split(':')[0]
+                    peer_port = server_port
+                    endpoints = ["/chain", "/blockchain", "/blockchain.json", "/blocks"]
+                    remote_chain = None
+                    for ep in endpoints:
+                        try:
+                            url = f"http://{peer_host}:{peer_port}{ep}"
+                            resp = requests.get(url, timeout=3)
+                            if resp.status_code == 200:
+                                try:
+                                    data_remote = resp.json()
+                                    if isinstance(data_remote, dict) and "chain" in data_remote:
+                                        remote_chain = data_remote["chain"]
+                                    elif isinstance(data_remote, list):
+                                        remote_chain = data_remote
+                                    elif isinstance(data_remote, dict) and "blocks" in data_remote and isinstance(data_remote["blocks"], list):
+                                        remote_chain = data_remote["blocks"]
+                                    if remote_chain is not None:
+                                        break
+                                except ValueError:
+                                    continue
+                        except Exception:
+                            continue
+
+                    if remote_chain and valid_chain(remote_chain, difficulty):
+                        local_len = len(blockchain)
+                        remote_len = len(remote_chain)
+                        adopt = False
+                        if remote_len > local_len:
+                            adopt = True
+                        elif remote_len == local_len:
+                            try:
+                                remote_last = remote_chain[-1].get("hash")
+                                local_last = blockchain[-1].hash
+                                if remote_last and int(remote_last, 16) < int(local_last, 16):
+                                    adopt = True
+                            except Exception:
+                                adopt = False
+
+                        if adopt:
+                            try:
+                                with open(blockchain_fpath, "w") as f:
+                                    json.dump(remote_chain, f, indent=2)
+                                reloaded = _load_chain(blockchain_fpath)
+                                blockchain[:] = reloaded
+                                print(f"[consensus] Adopted remote chain from {peer_host}:{peer_port} (len {remote_len}).")
+                                try:
+                                    on_valid_block_callback(blockchain_fpath, blockchain)
+                                except Exception:
+                                    pass
+                                # Rebroadcast do tip para acelerar convergência
+                                try:
+                                    tip = blockchain[-1]
+                                    from network import broadcast_block as _broadcast_block
+                                    _broadcast_block(tip, "configs/peers.txt", server_port)
+                                except Exception:
+                                    pass
+                            except Exception as e:
+                                print(f"[consensus] Failed to adopt remote chain: {e}")
+                except Exception:
+                    pass
+
             else:
                 print(f"[!] Invalid block received from {addr}")
         elif msg.get("type") == "tx":
