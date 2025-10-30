@@ -5,7 +5,6 @@ import threading
 import traceback
 from typing import Callable, Dict, List
 from block import Block, create_block_from_dict, hash_block
-import requests  # novo import para buscar chains via HTTP
 
 
 def list_peers(fpath: str):
@@ -43,6 +42,30 @@ def broadcast_transaction(tx: Dict, peers_fpath: str, port: int):
             )
 
 
+def request_chain(peer_ip: str, port: int, timeout: int = 5):
+    """
+    Conecta ao peer e solicita a cadeia local dele via mensagem 'get_chain'.
+    Retorna a cadeia (lista de dicts) ou None em caso de falha.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((peer_ip, port))
+        s.send(json.dumps({"type": "get_chain", "data": None}).encode())
+        # espera resposta
+        data = s.recv(65536).decode()
+        s.close()
+        if not data:
+            return None
+        msg = json.loads(data)
+        if msg.get("type") == "chain":
+            return msg.get("data")
+        return None
+    except Exception as e:
+        print(f"[REQUEST_CHAIN] Exception contacting {peer_ip}:{port} - {e}")
+        return None
+
+
 def handle_client(
     conn: socket.socket,
     addr: str,
@@ -51,64 +74,19 @@ def handle_client(
     transactions: List[Dict],
     blockchain_fpath: str,
     on_valid_block_callback: Callable,
-    server_port: int,  # novo parâmetro
+    peers_fpath: str,
+    port: int,
 ):
     try:
-        raw = conn.recv(65536)
-        if not raw:
+        data = conn.recv(65536).decode()
+        if not data:
+            conn.close()
             return
-        try:
-            data = raw.decode()
-        except Exception:
-            print(f"[!] Failed to decode bytes from {addr}")
-            return
-
-        if not data or not data.strip():
-            return
-
-        # --- Tratar requisições HTTP GET (requests.get envia GET) ---
-        first_line = data.splitlines()[0] if data.splitlines() else ""
-        if first_line.startswith("GET "):
-            parts = first_line.split()
-            path = parts[1] if len(parts) >= 2 else "/"
-            endpoints = ["/chain", "/blockchain", "/blockchain.json", "/blocks"]
-            if path in endpoints:
-                try:
-                    chain_list = [b.as_dict() for b in blockchain]
-                    payload = json.dumps(chain_list)
-                    resp = (
-                        "HTTP/1.1 200 OK\r\n"
-                        "Content-Type: application/json\r\n"
-                        f"Content-Length: {len(payload.encode())}\r\n"
-                        "Connection: close\r\n"
-                        "\r\n"
-                        f"{payload}"
-                    )
-                    conn.send(resp.encode())
-                except Exception as e:
-                    print(f"[!] Error sending chain to {addr}: {e}")
-                return
-            else:
-                resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                try:
-                    conn.send(resp.encode())
-                except Exception:
-                    pass
-                return
-        # --- Fim tratamento HTTP ---
-
-        # Mensagens de peers via socket raw (JSON)
-        try:
-            msg = json.loads(data.strip())
-        except json.JSONDecodeError:
-            print(f"[!] Received non-JSON or malformed message from {addr}: {data!r}")
-            return
-
-        if msg.get("type") == "block":
+        msg = json.loads(data)
+        msg_type = msg.get("type")
+        if msg_type == "block":
             block = create_block_from_dict(msg["data"])
             expected_hash = hash_block(block)
-
-            # Bloco parece válido para nosso estado atual -> adicionar e disparar consenso
             if (
                 block.prev_hash == blockchain[-1].hash
                 and block.hash.startswith("0" * difficulty)
@@ -185,94 +163,57 @@ def handle_client(
                     pass
 
             else:
-                # O bloco não conecta. Pode ser parte de uma cadeia mais longa no peer.
-                print(f"[!] Block from {addr} doesn't connect to current chain. Attempting to resolve...")
-
+                print(f"[!] Received block does not extend local chain (maybe fork). Trying to resolve with peer {addr[0]}")
+                # Tenta resolver solicitando a cadeia ao peer
                 try:
-                    peer_host = addr[0] if isinstance(addr, tuple) else addr.split(':')[0]
-                    peer_port = server_port  # assume peers usam a mesma porta
-                    endpoints = ["/chain", "/blockchain", "/blockchain.json", "/blocks"]
-                    remote_chain = None
-                    for ep in endpoints:
-                        try:
-                            url = f"http://{peer_host}:{peer_port}{ep}"
-                            resp = requests.get(url, timeout=3)
-                            if resp.status_code == 200:
-                                try:
-                                    data_remote = resp.json()
-                                    if isinstance(data_remote, dict) and "chain" in data_remote:
-                                        remote_chain = data_remote["chain"]
-                                    elif isinstance(data_remote, list):
-                                        remote_chain = data_remote
-                                    elif isinstance(data_remote, dict) and "blocks" in data_remote and isinstance(data_remote["blocks"], list):
-                                        remote_chain = data_remote["blocks"]
-                                    if remote_chain is not None:
-                                        break
-                                except ValueError:
-                                    continue
-                        except Exception:
-                            continue
-
+                    remote_chain = request_chain(addr[0], port)
                     if remote_chain:
-                        from chain import valid_chain, load_chain
-                        if not valid_chain(remote_chain, difficulty):
-                            print(f"[consensus] Remote chain from {peer_host}:{peer_port} is invalid, ignoring.")
+                        # Importa aqui para evitar circular imports no topo
+                        from chain import resolve_conflicts
+
+                        replaced = resolve_conflicts(blockchain, remote_chain, difficulty, blockchain_fpath)
+                        if replaced:
+                            print(f"[✓] Chain replaced using chain from {addr[0]}")
                         else:
-                            local_len = len(blockchain)
-                            remote_len = len(remote_chain)
-                            adopt = False
-                            if remote_len > local_len:
-                                adopt = True
-                            elif remote_len == local_len:
-                                try:
-                                    remote_last = remote_chain[-1].get("hash")
-                                    local_last = blockchain[-1].hash
-                                    if remote_last and int(remote_last, 16) < int(local_last, 16):
-                                        adopt = True
-                                except Exception:
-                                    adopt = False
-
-                            if adopt:
-                                try:
-                                    with open(blockchain_fpath, "w") as f:
-                                        json.dump(remote_chain, f, indent=2)
-                                    reloaded = load_chain(blockchain_fpath)
-                                    blockchain[:] = reloaded
-                                    print(f"[consensus] Adopted remote chain from {peer_host}:{peer_port} (len {remote_len}).")
-                                    try:
-                                        on_valid_block_callback(blockchain_fpath, blockchain)
-                                    except Exception:
-                                        pass
-                                    # Rebroadcast do tip para acelerar convergência
-                                    try:
-                                        tip = blockchain[-1]
-                                        from network import broadcast_block as _broadcast_block
-                                        _broadcast_block(tip, "configs/peers.txt", server_port)
-                                    except Exception:
-                                        pass
-                                except Exception as e:
-                                    print(f"[consensus] Failed to adopt remote chain: {e}")
-                            else:
-                                print(f"[consensus] Kept local chain (longer/better than {peer_host}:{peer_port}).")
+                            print("[i] No replacement performed after requesting remote chain.")
                     else:
-                        print(f"[consensus] Could not fetch chain from {peer_host}:{peer_port}")
+                        print("[!] Could not fetch remote chain to resolve conflict.")
                 except Exception as e:
-                    print(f"[!] Failed to resolve chain conflict with {addr}: {e}")
-
-        elif msg.get("type") == "tx":
+                    print(f"[!] Error while requesting remote chain: {e}")
+        elif msg_type == "tx":
             tx = msg["data"]
             if tx not in transactions:
                 transactions.append(tx)
                 print(f"[+] Transaction received from {addr}")
+        elif msg_type == "get_chain":
+            # O peer quer a nossa chain: responde com type 'chain' e a cadeia serializada
+            try:
+                payload = [b.as_dict() for b in blockchain]
+                conn.send(json.dumps({"type": "chain", "data": payload}).encode())
+                print(f"[✓] Responded chain to {addr}")
+            except Exception as e:
+                print(f"[!] Could not send chain to {addr}: {e}")
+        elif msg_type == "chain":
+            # Um peer nos enviou a cadeia completa para que possamos tentar resolver conflitos
+            try:
+                remote_chain = msg.get("data")
+                from chain import resolve_conflicts
+
+                replaced = resolve_conflicts(blockchain, remote_chain, difficulty, blockchain_fpath)
+                if replaced:
+                    on_valid_block_callback(blockchain_fpath, blockchain)
+                    print(f"[✓] Local chain replaced by chain received from {addr}")
+                else:
+                    print("[i] Received chain did not replace local chain.")
+            except Exception as e:
+                print(f"[!] Error processing received chain from {addr}: {e}")
+        else:
+            print(f"[!] Unknown message type {msg_type} from {addr}")
     except Exception as e:
         print(
             f"Exception when hadling client. Exception: {e}. {traceback.format_exc()}"
         )
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    conn.close()
 
 
 def start_server(
@@ -283,6 +224,7 @@ def start_server(
     transactions: List[Dict],
     blockchain_fpath: str,
     on_valid_block_callback: Callable,
+    peers_fpath: str,
 ):
     def server_thread():
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -301,7 +243,8 @@ def start_server(
                     transactions,
                     blockchain_fpath,
                     on_valid_block_callback,
-                    port,  # passa a porta do servidor ao handler
+                    peers_fpath,
+                    port,
                 ),
             ).start()
 

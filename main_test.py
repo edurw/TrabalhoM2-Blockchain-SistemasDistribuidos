@@ -18,7 +18,7 @@ if __name__ == "__main__":
         config["difficulty"],
         transactions,
         config["blockchain_file"],
-        on_valid_block_callback,
+        config.get("peers_file", "configs/peers.txt"),
     )
 
     # create a transaction
