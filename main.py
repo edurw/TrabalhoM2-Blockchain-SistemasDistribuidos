@@ -14,6 +14,8 @@ from utils import load_config
 import requests
 import json
 import os
+import threading
+import time
 
 
 if __name__ == "__main__":
@@ -167,6 +169,27 @@ if __name__ == "__main__":
 
         return new_chain
 
+    # Thread de sincronização periódica: chama resolve_conflicts e atualiza blockchain em-place
+    def start_periodic_sync(interval_seconds: int = 3):
+        def worker():
+            while True:
+                try:
+                    new_chain = resolve_conflicts(blockchain, config["blockchain_file"], config["peers_file"], config["port"], config["difficulty"])
+                    if new_chain:
+                        try:
+                            # atualiza em-place para preservar referências
+                            blockchain[:] = new_chain
+                        except Exception:
+                            # fallback: sobrescrever a referência (menos desejável, mas seguro)
+                            blockchain = new_chain
+                            pass
+                except Exception as e:
+                    print(f"[sync] Error during periodic sync: {e}")
+                time.sleep(interval_seconds)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
     start_server(
         config["host"],
         config["port"],
@@ -176,6 +199,9 @@ if __name__ == "__main__":
         config["blockchain_file"],
         on_valid_block_callback,
     )
+
+    # iniciar sincronização periódica para convergência automática entre peers
+    start_periodic_sync(interval_seconds=3)
 
     # Ao iniciar, tentar resolver conflitos (adotar cadeia mais longa)
     blockchain = resolve_conflicts(blockchain, config["blockchain_file"], config["peers_file"], config["port"], config["difficulty"])
