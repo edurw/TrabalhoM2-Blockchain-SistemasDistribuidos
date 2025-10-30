@@ -5,7 +5,6 @@ import threading
 import traceback
 from typing import Callable, Dict, List
 from block import Block, create_block_from_dict, hash_block
-import requests  # novo import para buscar chains via HTTP
 
 
 def list_peers(fpath: str):
@@ -50,7 +49,6 @@ def handle_client(
     transactions: List[Dict],
     blockchain_fpath: str,
     on_valid_block_callback: Callable,
-    server_port: int,  # novo parâmetro
 ):
     try:
         raw = conn.recv(65536)
@@ -110,8 +108,6 @@ def handle_client(
         if msg.get("type") == "block":
             block = create_block_from_dict(msg["data"])
             expected_hash = hash_block(block)
-
-            # Primeiro, tenta validar o bloco para o estado atual
             if (
                 block.prev_hash == blockchain[-1].hash
                 and block.hash.startswith("0" * difficulty)
@@ -121,81 +117,7 @@ def handle_client(
                 on_valid_block_callback(blockchain_fpath, blockchain)
                 print(f"[✓] New valid block added from {addr}")
             else:
-                # Se o bloco não é válido para o estado atual, pode ser parte de uma cadeia mais longa
-                print(f"[!] Block from {addr} doesn't connect to current chain. Attempting to resolve...")
-
-                # Tentar buscar a cadeia completa do peer via HTTP (usa a porta do servidor)
-                try:
-                    peer_host = addr[0] if isinstance(addr, tuple) else addr.split(':')[0]
-                    peer_port = server_port  # assume peers usam a mesma porta de escuta
-
-                    endpoints = ["/chain", "/blockchain", "/blockchain.json", "/blocks"]
-                    remote_chain = None
-                    for ep in endpoints:
-                        try:
-                            url = f"http://{peer_host}:{peer_port}{ep}"
-                            resp = requests.get(url, timeout=3)
-                            if resp.status_code == 200:
-                                try:
-                                    data_remote = resp.json()
-                                    if isinstance(data_remote, dict) and "chain" in data_remote:
-                                        remote_chain = data_remote["chain"]
-                                    elif isinstance(data_remote, list):
-                                        remote_chain = data_remote
-                                    elif isinstance(data_remote, dict) and "blocks" in data_remote and isinstance(data_remote["blocks"], list):
-                                        remote_chain = data_remote["blocks"]
-                                    if remote_chain is not None:
-                                        break
-                                except ValueError:
-                                    continue
-                        except Exception:
-                            continue
-
-                    if remote_chain:
-                        # importa validadores/carregadores em tempo de execução para evitar import circular
-                        from chain import valid_chain, load_chain
-
-                        # validar cadeia remota
-                        if not valid_chain(remote_chain, difficulty):
-                            print(f"[consensus] Remote chain from {peer_host}:{peer_port} is invalid, ignoring.")
-                        else:
-                            # decidir adoção: maior comprimento OU tie-breaker (last hash numericamente menor)
-                            local_len = len(blockchain)
-                            remote_len = len(remote_chain)
-                            adopt = False
-                            if remote_len > local_len:
-                                adopt = True
-                            elif remote_len == local_len:
-                                try:
-                                    remote_last = remote_chain[-1].get("hash")
-                                    local_last = blockchain[-1].hash
-                                    if remote_last and int(remote_last, 16) < int(local_last, 16):
-                                        adopt = True
-                                except Exception:
-                                    adopt = False
-
-                            if adopt:
-                                # substituir arquivo local e recarregar cadeia em memória
-                                try:
-                                    with open(blockchain_fpath, "w") as f:
-                                        json.dump(remote_chain, f, indent=2)
-                                    reloaded = load_chain(blockchain_fpath)
-                                    blockchain[:] = reloaded
-                                    print(f"[consensus] Adopted remote chain from {peer_host}:{peer_port} (len {remote_len}).")
-                                    # opcional: persistir via callback
-                                    try:
-                                        on_valid_block_callback(blockchain_fpath, blockchain)
-                                    except Exception:
-                                        pass
-                                except Exception as e:
-                                    print(f"[consensus] Failed to adopt remote chain: {e}")
-                            else:
-                                print(f"[consensus] Kept local chain (longer/better than {peer_host}:{peer_port}).")
-                    else:
-                        print(f"[consensus] Could not fetch chain from {peer_host}:{peer_port}")
-                except Exception as e:
-                    print(f"[!] Failed to resolve chain conflict with {addr}: {e}")
-
+                print(f"[!] Invalid block received from {addr}")
         elif msg.get("type") == "tx":
             tx = msg["data"]
             if tx not in transactions:
@@ -238,7 +160,6 @@ def start_server(
                     transactions,
                     blockchain_fpath,
                     on_valid_block_callback,
-                    port,  # passa a porta do servidor ao handler
                 ),
             ).start()
 
