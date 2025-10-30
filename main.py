@@ -62,12 +62,10 @@ if __name__ == "__main__":
                 if resp.status_code == 200:
                     try:
                         data = resp.json()
-                        # Caso a resposta seja um objeto que contenha a chain:
                         if isinstance(data, dict) and "chain" in data:
                             return data["chain"]
                         if isinstance(data, list):
                             return data
-                        # se for dict com "blocks" por exemplo
                         if isinstance(data, dict) and "blocks" in data and isinstance(data["blocks"], list):
                             return data["blocks"]
                     except ValueError:
