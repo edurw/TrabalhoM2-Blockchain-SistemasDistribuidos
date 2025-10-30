@@ -180,8 +180,7 @@ if __name__ == "__main__":
                             # atualiza em-place para preservar referências
                             blockchain[:] = new_chain
                         except Exception:
-                            # fallback: sobrescrever a referência (menos desejável, mas seguro)
-                            blockchain = new_chain
+                            # fallback removido para evitar UnboundLocalError
                             pass
                 except Exception as e:
                     print(f"[sync] Error during periodic sync: {e}")
