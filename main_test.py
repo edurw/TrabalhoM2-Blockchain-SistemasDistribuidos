@@ -18,6 +18,7 @@ if __name__ == "__main__":
         config["difficulty"],
         transactions,
         config["blockchain_file"],
+        config.get("peers_file", "configs/peers.txt"),
     )
 
     # create a transaction

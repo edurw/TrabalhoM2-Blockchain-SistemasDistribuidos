@@ -28,58 +28,39 @@ def save_chain(fpath: str, chain: list[Block]):
         json.dump(blockchain_serializable, f, indent=2)
 
 
-def valid_chain(chain, difficulty: int = None):
+def valid_chain(chain, difficulty: int) -> bool:
     """
-    Valida uma cadeia. `chain` pode ser:
-    - lista de Block objects
-    - lista de dicts (serializada)
-    Se `difficulty` for fornecida, também verifica proof-of-work (hash startswith zeros).
-    Esta versão é tolerante a blocos serializados sem campo 'hash' — calcula e preenche.
+    Verifica se uma cadeia é válida.
+    chain pode ser lista de Block ou lista de dicts (serializados).
+    Verificações:
+      - prev_hash de cada bloco coincide com hash do anterior
+      - hash do bloco é correto (re-hash)
+      - proof-of-work: hash inicia com '0' * difficulty
     """
-    # normalizar para lista de dicts
-    normalized = []
-    if not chain:
-        return False
-
-    if isinstance(chain[0], Block):
-        for b in chain:
-            normalized.append(b.as_dict())
-    else:
-        # assume lista de dicts
-        normalized = [dict(b) for b in chain]  # copia para permitir modificações
-
-    # verificar continuidade e integridade dos hashes
-    for i in range(1, len(normalized)):
-        prev = normalized[i - 1]
-        cur = normalized[i]
-
-        # checar link para o bloco anterior
-        if cur.get("prev_hash") != prev.get("hash"):
+    # Normaliza para Block objects
+    normalized_chain: List[Block] = []
+    for b in chain:
+        if isinstance(b, dict):
+            normalized_chain.append(create_block_from_dict(b))
+        elif isinstance(b, Block):
+            normalized_chain.append(b)
+        else:
             return False
 
-        # calcular hash esperado a partir dos campos do bloco atual
-        try:
-            temp_block = create_block_from_dict(cur)
-            expected_hash = hash_block(temp_block)
-        except Exception:
+    # Genesis é permitida (índice 0)
+    for i in range(1, len(normalized_chain)):
+        prev = normalized_chain[i - 1]
+        curr = normalized_chain[i]
+        # prev_hash link check
+        if curr.prev_hash != prev.hash:
             return False
-
-        # se o bloco remoto não trouxe 'hash', preenchê-lo com o esperado (aceitar)
-        remote_hash = cur.get("hash")
-        if not remote_hash:
-            cur["hash"] = expected_hash
-            remote_hash = expected_hash
-
-        # comparar hashes
-        if remote_hash != expected_hash:
-            # mismatch detectado -> cadeia inválida
+        # hash correctness
+        expected = hash_block(curr)
+        if curr.hash != expected:
             return False
-
-        # verificar proof-of-work se necessário
-        if difficulty is not None:
-            if not expected_hash.startswith("0" * difficulty):
-                return False
-
+        # proof-of-work
+        if not curr.hash.startswith("0" * difficulty):
+            return False
     return True
 
 
@@ -133,3 +114,35 @@ def get_balance(node_id: str, blockchain: List[Block]) -> float:
 
 def on_valid_block_callback(fpath, chain):
     save_chain(fpath, chain)
+
+
+def resolve_conflicts(local_chain: List[Block], remote_chain_data, difficulty: int, fpath: str):
+    """
+    Implementa a Longest Chain Rule:
+      - remote_chain_data pode ser lista de dicts ou lista de Block
+      - se a cadeia remota for mais longa e válida, substitui a cadeia local e salva em disco
+    Retorna True se substituiu, False caso contrário.
+    """
+    # Normaliza remote para Blocks
+    remote_chain: List[Block] = []
+    for b in remote_chain_data:
+        if isinstance(b, dict):
+            remote_chain.append(create_block_from_dict(b))
+        elif isinstance(b, Block):
+            remote_chain.append(b)
+        else:
+            # tipo inválido
+            return False
+
+    if len(remote_chain) <= len(local_chain):
+        return False
+
+    if not valid_chain(remote_chain, difficulty):
+        return False
+
+    # Substitui conteúdo da lista local para manter referências
+    local_chain.clear()
+    local_chain.extend(remote_chain)
+    save_chain(fpath, local_chain)
+    print("[✓] Local chain replaced by a longer valid remote chain.")
+    return True
