@@ -1,6 +1,6 @@
 from typing import Dict, List
 
-from chain import load_chain, make_transaction, mine_block
+from chain import load_chain, make_transaction, mine_block, on_valid_block_callback
 from network import start_server
 from utils import load_config
 
@@ -18,6 +18,7 @@ if __name__ == "__main__":
         config["difficulty"],
         transactions,
         config["blockchain_file"],
+        on_valid_block_callback,
     )
 
     # create a transaction
