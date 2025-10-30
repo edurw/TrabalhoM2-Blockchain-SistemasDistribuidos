@@ -89,23 +89,82 @@ if __name__ == "__main__":
             print(f"[consensus] Erro ao salvar chain remota: {e}")
         return local_chain, False
 
-    def resolve_conflicts(local_chain: List[Dict], blockchain_file: str, peers_file: str, default_port: int):
-        """Implementa a Longest Chain Rule: busca as chains dos peers e adota a maior."""
+    def resolve_conflicts(local_chain: List[Dict], blockchain_file: str, peers_file: str, default_port: int, difficulty: int):
+        """
+        Implementa Longest Chain Rule com validação:
+        - valida chains remotas via chain.valid_chain(..., difficulty)
+        - adota cadeia mais longa
+        - se empate no comprimento, adota cadeia cujo último hash seja numericamente menor
+        """
         peers = read_peers(peers_file)
+        # normalizar local_chain para lista de dicts para comparações
+        try:
+            from chain import valid_chain, load_chain as _load_chain
+        except Exception:
+            # fallback caso import circular apareça
+            valid_chain = None
+            _load_chain = None
+
+        # criar uma cópia que será atualizada
         new_chain = local_chain
-        replaced = False
+
         for p in peers:
             remote_chain = fetch_chain_from_peer(p["host"], p.get("port", default_port))
-            if remote_chain:
-                new_chain, did_replace = replace_local_chain_if_longer(new_chain, remote_chain, blockchain_file)
-                replaced = replaced or did_replace
-        if replaced:
-            # reload chain do arquivo atualizada
+            if not remote_chain:
+                continue
+
+            # validar cadeia remota se possível
             try:
-                reloaded = load_chain(blockchain_file)
-                return reloaded
+                if valid_chain is not None and not valid_chain(remote_chain, difficulty):
+                    print(f"[consensus] Remote chain from {p['host']}:{p.get('port', default_port)} is invalid, ignoring.")
+                    continue
             except Exception as e:
-                print(f"[consensus] Falha ao recarregar blockchain: {e}")
+                print(f"[consensus] Error validating remote chain from {p['host']}:{p.get('port', default_port)}: {e}")
+                continue
+
+            # normalizar both para lista de dicts (podem ser Block objects localmente)
+            def to_dicts(chain):
+                if not chain:
+                    return []
+                # detectar Block objects pelo primeiro item
+                first = chain[0]
+                if hasattr(first, "as_dict"):
+                    return [b.as_dict() for b in chain]
+                else:
+                    return [dict(b) for b in chain]
+
+            local_norm = to_dicts(new_chain)
+            remote_norm = to_dicts(remote_chain)
+
+            local_len = len(local_norm)
+            remote_len = len(remote_norm)
+            adopt = False
+
+            if remote_len > local_len:
+                adopt = True
+            elif remote_len == local_len:
+                try:
+                    remote_last = remote_norm[-1].get("hash")
+                    local_last = local_norm[-1].get("hash")
+                    if remote_last and local_last and int(remote_last, 16) < int(local_last, 16):
+                        adopt = True
+                except Exception:
+                    adopt = False
+
+            if adopt:
+                try:
+                    # gravar cadeia remota e recarregar em memória
+                    with open(blockchain_file, "w") as f:
+                        json.dump(remote_norm, f, indent=2)
+                    if _load_chain is not None:
+                        reloaded = _load_chain(blockchain_file)
+                        new_chain = reloaded
+                    else:
+                        new_chain = remote_chain
+                    print(f"[consensus] Adopted remote chain from {p['host']}:{p.get('port', default_port)} (len {remote_len}).")
+                except Exception as e:
+                    print(f"[consensus] Failed to adopt remote chain from {p['host']}:{p.get('port', default_port)}: {e}")
+
         return new_chain
 
     start_server(
@@ -119,7 +178,7 @@ if __name__ == "__main__":
     )
 
     # Ao iniciar, tentar resolver conflitos (adotar cadeia mais longa)
-    blockchain = resolve_conflicts(blockchain, config["blockchain_file"], config["peers_file"], config["port"])
+    blockchain = resolve_conflicts(blockchain, config["blockchain_file"], config["peers_file"], config["port"], config["difficulty"])
 
     print("=== SimpleCoin CLI ===")
     while True:
@@ -145,7 +204,7 @@ if __name__ == "__main__":
 
         elif choice == "2":
             # Antes de minerar, garantir que estamos na maior cadeia possível
-            blockchain = resolve_conflicts(blockchain, config["blockchain_file"], config["peers_file"], config["port"])
+            blockchain = resolve_conflicts(blockchain, config["blockchain_file"], config["peers_file"], config["port"], config["difficulty"])
 
             mine_block(
                 transactions,
@@ -159,11 +218,11 @@ if __name__ == "__main__":
             )
 
             # Após minerar, verificar se algum peer tem cadeia mais longa (conflito simultâneo)
-            blockchain = resolve_conflicts(blockchain, config["blockchain_file"], config["peers_file"], config["port"])
+            blockchain = resolve_conflicts(blockchain, config["blockchain_file"], config["peers_file"], config["port"], config["difficulty"])
 
         elif choice == "3":
             # Opcional: antes de mostrar, sincronizar
-            blockchain = resolve_conflicts(blockchain, config["blockchain_file"], config["peers_file"], config["port"])
+            blockchain = resolve_conflicts(blockchain, config["blockchain_file"], config["peers_file"], config["port"], config["difficulty"])
             print_chain(blockchain)
 
         elif choice == "4":
